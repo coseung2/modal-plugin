@@ -8,6 +8,7 @@ import pydantic
 
 
 SAFE_NAME_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
+SAFE_OWNER_PATTERN = r"^(local|oauth-[a-f0-9]{32})$"
 
 
 def utc_now() -> datetime:
@@ -20,6 +21,7 @@ class PipelineSpec(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
     name: str = pydantic.Field(pattern=SAFE_NAME_PATTERN)
+    owner_id: str = pydantic.Field(default="local", pattern=SAFE_OWNER_PATTERN)
     account_id: str = pydantic.Field(default="default", pattern=SAFE_NAME_PATTERN)
     app_name: str = pydantic.Field(min_length=1, max_length=128)
     function_name: str = pydantic.Field(min_length=1, max_length=128)
@@ -61,6 +63,7 @@ class ModelArtifact(pydantic.BaseModel):
 
     name: str = pydantic.Field(pattern=SAFE_NAME_PATTERN)
     version: str = pydantic.Field(min_length=1, max_length=128)
+    owner_id: str = pydantic.Field(default="local", pattern=SAFE_OWNER_PATTERN)
     account_id: str = pydantic.Field(default="default", pattern=SAFE_NAME_PATTERN)
     volume_name: str = pydantic.Field(min_length=1, max_length=64)
     remote_path: str = pydantic.Field(min_length=1, max_length=1024)
@@ -75,6 +78,7 @@ class RunRecord(pydantic.BaseModel):
 
     call_id: str = pydantic.Field(min_length=1)
     pipeline_name: str = pydantic.Field(min_length=1)
+    owner_id: str = pydantic.Field(default="local", pattern=SAFE_OWNER_PATTERN)
     account_id: str = pydantic.Field(default="default", pattern=SAFE_NAME_PATTERN)
     environment: str = pydantic.Field(min_length=1)
     gpu: str | None = None
