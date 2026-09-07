@@ -171,7 +171,7 @@ async def modal_connect_route(request: Request):
 
 
 @mcp.custom_route("/health", methods=["GET"])
-async def health_route(request: Request):  # noqa: ARG001
+async def health_route(request: Request):
     return JSONResponse({"ok": True, "service": "modal-plugin"})
 
 
