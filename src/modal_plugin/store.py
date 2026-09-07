@@ -30,7 +30,7 @@ class JsonRegistry(Generic[T]):
         with self.path.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
         if not isinstance(raw, dict):
-            raise ValueError(f"Registry {self.path} is corrupt: expected an object")
+            raise TypeError(f"Registry {self.path} is corrupt: expected an object")
         return raw
 
     def _write_raw(self, value: dict[str, dict]) -> None:
