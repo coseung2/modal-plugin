@@ -4,17 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "modal-plugin"
-version = "0.1.0"
-description = "MCP control plane for managing Modal pipelines, model artifacts, and GPU runs from ChatGPT and Codex."
+version = "0.2.0"
+description = "MCP control plane for managing Modal pipelines, linked accounts, model artifacts, and GPU runs from ChatGPT and Codex."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "modal-plugin contributors" }]
 dependencies = [
+  "cryptography>=45,<47",
   "mcp>=2,<3",
-  "modal>=1.2.2,<2",
+  "modal>=1.5,<2",
   "pydantic>=2.8,<3",
   "pydantic-settings>=2.4,<3",
+  "starlette>=0.47,<1",
 ]
 
 [project.optional-dependencies]
