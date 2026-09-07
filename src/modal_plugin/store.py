@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from threading import RLock
-from typing import Callable, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from pydantic import BaseModel
 
