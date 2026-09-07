@@ -20,7 +20,7 @@ def claim_scopes(claims: dict[str, Any]) -> list[str]:
 
 
 def owner_id_from_identity(issuer: str, subject: str) -> str:
-    digest = hashlib.sha256(f"{issuer}\0{subject}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{issuer}\0{subject}".encode()).hexdigest()
     return f"oauth-{digest[:32]}"
 
 
