@@ -20,6 +20,7 @@ class PipelineSpec(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
     name: str = pydantic.Field(pattern=SAFE_NAME_PATTERN)
+    account_id: str = pydantic.Field(default="default", pattern=SAFE_NAME_PATTERN)
     app_name: str = pydantic.Field(min_length=1, max_length=128)
     function_name: str = pydantic.Field(min_length=1, max_length=128)
     environment: str = pydantic.Field(default="dev", min_length=1, max_length=64)
@@ -44,6 +45,7 @@ class PipelineSpec(pydantic.BaseModel):
 class PipelinePatch(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
+    account_id: str | None = pydantic.Field(default=None, pattern=SAFE_NAME_PATTERN)
     app_name: str | None = pydantic.Field(default=None, min_length=1, max_length=128)
     function_name: str | None = pydantic.Field(default=None, min_length=1, max_length=128)
     environment: str | None = pydantic.Field(default=None, min_length=1, max_length=64)
@@ -59,6 +61,7 @@ class ModelArtifact(pydantic.BaseModel):
 
     name: str = pydantic.Field(pattern=SAFE_NAME_PATTERN)
     version: str = pydantic.Field(min_length=1, max_length=128)
+    account_id: str = pydantic.Field(default="default", pattern=SAFE_NAME_PATTERN)
     volume_name: str = pydantic.Field(min_length=1, max_length=64)
     remote_path: str = pydantic.Field(min_length=1, max_length=1024)
     source: str | None = pydantic.Field(default=None, max_length=2048)
@@ -72,6 +75,7 @@ class RunRecord(pydantic.BaseModel):
 
     call_id: str = pydantic.Field(min_length=1)
     pipeline_name: str = pydantic.Field(min_length=1)
+    account_id: str = pydantic.Field(default="default", pattern=SAFE_NAME_PATTERN)
     environment: str = pydantic.Field(min_length=1)
     gpu: str | None = None
     status: Literal["spawned", "completed", "failed", "cancelled", "unknown"] = "spawned"
