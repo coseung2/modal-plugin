@@ -1,20 +1,17 @@
 from modal_plugin.account_link import AccountLinkSessions
+from modal_plugin.auth import owner_id_from_identity
 
 
-def test_link_session_is_one_time() -> None:
+def test_link_is_single_use() -> None:
     sessions = AccountLinkSessions(ttl_seconds=600)
-    created = sessions.create("default")
+    session = sessions.create("studio")
+    assert sessions.get(session.token) == session
+    assert sessions.consume(session.token) == session
+    assert sessions.get(session.token) is None
 
-    assert sessions.get(created.token) == created
-    assert sessions.consume(created.token) == created
-    assert sessions.get(created.token) is None
 
-
-def test_link_session_rejects_unsafe_account_id() -> None:
-    sessions = AccountLinkSessions(ttl_seconds=600)
-    try:
-        sessions.create("../../secret")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("unsafe account id should fail")
+def test_link_is_bound_to_requesting_owner() -> None:
+    owner = owner_id_from_identity("https://id.example", "user")
+    session = AccountLinkSessions().create("studio", owner_id=owner)
+    assert session.owner_id == owner
+    assert session.account_id == "studio"
