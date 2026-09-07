@@ -11,7 +11,7 @@ from typing import Any, Literal
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 
-from .models import SAFE_NAME_PATTERN, utc_now
+from .models import SAFE_NAME_PATTERN, SAFE_OWNER_PATTERN, utc_now
 
 
 class CredentialStoreDisabled(RuntimeError):
@@ -19,6 +19,7 @@ class CredentialStoreDisabled(RuntimeError):
 
 
 class LinkedAccount(BaseModel):
+    owner_id: str = Field(default="local", pattern=SAFE_OWNER_PATTERN)
     account_id: str = Field(pattern=SAFE_NAME_PATTERN)
     auth_type: Literal["token", "oauth"]
     workspace: str
@@ -29,6 +30,10 @@ class LinkedAccount(BaseModel):
 
 class _CredentialEnvelope(LinkedAccount):
     ciphertext: str
+
+
+def _owned(owner_id: str, account_id: str) -> str:
+    return f"{owner_id}:{account_id}"
 
 
 class CredentialVault:
@@ -45,6 +50,7 @@ class CredentialVault:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self._write_raw({})
+        self._migrate_keys()
 
     @property
     def enabled(self) -> bool:
@@ -91,25 +97,48 @@ class CredentialVault:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
 
-    def list(self) -> list[LinkedAccount]:
+    def _migrate_keys(self) -> None:
         with self._lock:
             raw = self._read_raw()
-            return [
-                LinkedAccount.model_validate({k: v for k, v in item.items() if k != "ciphertext"})
-                for item in raw.values()
-            ]
+            migrated: dict[str, dict[str, Any]] = {}
+            changed = False
+            for old_key, item in raw.items():
+                envelope = _CredentialEnvelope.model_validate(item)
+                new_key = _owned(envelope.owner_id, envelope.account_id)
+                payload = envelope.model_dump(mode="json")
+                if new_key in migrated and migrated[new_key] != payload:
+                    raise ValueError(f"Credential migration collision for {new_key!r}")
+                migrated[new_key] = payload
+                changed = changed or old_key != new_key or item != payload
+            if changed:
+                self._write_raw(migrated)
 
-    def get_metadata(self, account_id: str) -> LinkedAccount | None:
+    def list(self, owner_id: str = "local") -> list[LinkedAccount]:
         with self._lock:
-            item = self._read_raw().get(account_id)
+            raw = self._read_raw()
+            accounts = []
+            for item in raw.values():
+                public = {k: v for k, v in item.items() if k != "ciphertext"}
+                account = LinkedAccount.model_validate(public)
+                if account.owner_id == owner_id:
+                    accounts.append(account)
+            return accounts
+
+    def get_metadata(
+        self, account_id: str, *, owner_id: str = "local"
+    ) -> LinkedAccount | None:
+        with self._lock:
+            item = self._read_raw().get(_owned(owner_id, account_id))
             if item is None:
                 return None
             public = {k: v for k, v in item.items() if k != "ciphertext"}
             return LinkedAccount.model_validate(public)
 
-    def load_secret(self, account_id: str) -> tuple[str, dict[str, str]] | None:
+    def load_secret(
+        self, account_id: str, *, owner_id: str = "local"
+    ) -> tuple[str, dict[str, str]] | None:
         with self._lock:
-            item = self._read_raw().get(account_id)
+            item = self._read_raw().get(_owned(owner_id, account_id))
             if item is None:
                 return None
             envelope = _CredentialEnvelope.model_validate(item)
@@ -134,8 +163,10 @@ class CredentialVault:
         secret_payload: dict[str, str],
         workspace: str,
         environments: list[str],
+        owner_id: str = "local",
     ) -> LinkedAccount:
         LinkedAccount(
+            owner_id=owner_id,
             account_id=account_id,
             auth_type=auth_type,
             workspace=workspace,
@@ -146,12 +177,14 @@ class CredentialVault:
         ciphertext = self._fernet().encrypt(
             json.dumps(secret_payload, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
+        storage_key = _owned(owner_id, account_id)
         with self._lock:
             raw = self._read_raw()
-            previous = raw.get(account_id)
+            previous = raw.get(storage_key)
             now = utc_now()
             created_at = previous.get("created_at", now) if isinstance(previous, dict) else now
             envelope = _CredentialEnvelope(
+                owner_id=owner_id,
                 account_id=account_id,
                 auth_type=auth_type,
                 workspace=workspace,
@@ -160,15 +193,16 @@ class CredentialVault:
                 updated_at=now,
                 ciphertext=ciphertext,
             )
-            raw[account_id] = envelope.model_dump(mode="json")
+            raw[storage_key] = envelope.model_dump(mode="json")
             self._write_raw(raw)
             return LinkedAccount.model_validate(envelope.model_dump(exclude={"ciphertext"}))
 
-    def delete(self, account_id: str) -> bool:
+    def delete(self, account_id: str, *, owner_id: str = "local") -> bool:
+        storage_key = _owned(owner_id, account_id)
         with self._lock:
             raw = self._read_raw()
-            if account_id not in raw:
+            if storage_key not in raw:
                 return False
-            del raw[account_id]
+            del raw[storage_key]
             self._write_raw(raw)
             return True
