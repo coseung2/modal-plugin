@@ -7,12 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 
-from .models import SAFE_NAME_PATTERN
+from .models import SAFE_NAME_PATTERN, SAFE_OWNER_PATTERN
 
 
 @dataclass(frozen=True)
 class LinkSession:
     token: str
+    owner_id: str
     account_id: str
     expires_at: datetime
 
@@ -23,14 +24,17 @@ class AccountLinkSessions:
         self._items: dict[str, LinkSession] = {}
         self._lock = RLock()
 
-    def create(self, account_id: str) -> LinkSession:
+    def create(self, account_id: str, *, owner_id: str = "local") -> LinkSession:
         if re.fullmatch(SAFE_NAME_PATTERN, account_id) is None:
             raise ValueError(
                 "account_id must contain only letters, numbers, dots, underscores, or dashes"
             )
+        if re.fullmatch(SAFE_OWNER_PATTERN, owner_id) is None:
+            raise ValueError("owner_id is invalid")
         now = datetime.now(timezone.utc)
         session = LinkSession(
             token=secrets.token_urlsafe(32),
+            owner_id=owner_id,
             account_id=account_id,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
         )
