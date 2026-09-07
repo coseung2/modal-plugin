@@ -6,36 +6,118 @@ from typing import Any
 
 import modal
 
+from .credentials import CredentialVault, LinkedAccount
 from .models import ModelArtifact, PipelineSpec, RunRecord, utc_now
 
 
 class ModalGateway:
-    """Thin wrapper over the public Modal Python SDK.
+    """Thin wrapper over the public Modal Python SDK with per-account clients."""
 
-    Authentication is delegated to Modal's standard credential resolution. That supports
-    local profiles, API token environment variables, and third-party OAuth environment
-    variables without storing secrets in this application's registry.
-    """
+    def __init__(
+        self,
+        vault: CredentialVault,
+        *,
+        oauth_client_id: str | None = None,
+        oauth_client_secret: str | None = None,
+    ) -> None:
+        self.vault = vault
+        self.oauth_client_id = oauth_client_id
+        self.oauth_client_secret = oauth_client_secret
+        self._clients: dict[str, modal.Client] = {}
 
-    def __init__(self) -> None:
-        self._client: modal.Client | None = None
+    def _client_from_linked_secret(self, account_id: str) -> modal.Client | None:
+        loaded = self.vault.load_secret(account_id)
+        if loaded is None:
+            return None
+        auth_type, payload = loaded
+        if auth_type == "token":
+            return modal.Client.from_credentials(payload["token_id"], payload["token_secret"])
+        if not self.oauth_client_id or not self.oauth_client_secret:
+            raise RuntimeError(
+                "This account uses Modal OAuth but the server has no Modal OAuth client credentials. "
+                "Set MODAL_PLUGIN_MODAL_OAUTH_CLIENT_ID and MODAL_PLUGIN_MODAL_OAUTH_CLIENT_SECRET."
+            )
+        return modal.Client.from_oauth_credentials(
+            payload["refresh_token"],
+            oauth_client_id=self.oauth_client_id,
+            oauth_client_secret=self.oauth_client_secret,
+        )
 
-    def client(self) -> modal.Client:
-        if self._client is None or self._client.is_closed():
-            self._client = modal.Client.from_env()
-        return self._client
+    def client(self, account_id: str = "default") -> modal.Client:
+        cached = self._clients.get(account_id)
+        if cached is not None and not cached.is_closed():
+            return cached
 
-    def account_status(self) -> dict[str, Any]:
-        client = self.client()
+        linked = self._client_from_linked_secret(account_id)
+        if linked is not None:
+            self._clients[account_id] = linked
+            return linked
+
+        if account_id != "default":
+            raise KeyError(f"Modal account {account_id!r} is not linked")
+
+        client = modal.Client.from_env()
+        self._clients[account_id] = client
+        return client
+
+    def invalidate_client(self, account_id: str) -> None:
+        self._clients.pop(account_id, None)
+
+    @staticmethod
+    def _inspect_client(client: modal.Client) -> dict[str, Any]:
         client.hello()
         workspace = modal.Workspace.from_context(client=client)
-        workspace.hydrate()
+        workspace.hydrate(client=client)
         environments = modal.Environment.objects.list(client=client)
         return {
             "connected": True,
             "workspace": workspace.name,
             "environments": [env.name for env in environments],
         }
+
+    def account_status(self, account_id: str = "default") -> dict[str, Any]:
+        status = self._inspect_client(self.client(account_id))
+        status["account_id"] = account_id
+        status["linked"] = self.vault.get_metadata(account_id) is not None
+        return status
+
+    def link_token_account(
+        self, *, account_id: str, token_id: str, token_secret: str
+    ) -> LinkedAccount:
+        if not token_id or not token_secret:
+            raise ValueError("token_id and token_secret are required")
+        client = modal.Client.from_credentials(token_id, token_secret)
+        status = self._inspect_client(client)
+        linked = self.vault.save(
+            account_id=account_id,
+            auth_type="token",
+            secret_payload={"token_id": token_id, "token_secret": token_secret},
+            workspace=status["workspace"],
+            environments=status["environments"],
+        )
+        self.invalidate_client(account_id)
+        return linked
+
+    def link_oauth_account(self, *, account_id: str, refresh_token: str) -> LinkedAccount:
+        if not self.oauth_client_id or not self.oauth_client_secret:
+            raise RuntimeError("Modal OAuth client credentials are not configured on this server")
+        if not refresh_token:
+            raise ValueError("refresh_token is required")
+        client = modal.Client.from_oauth_credentials(
+            refresh_token,
+            oauth_client_id=self.oauth_client_id,
+            oauth_client_secret=self.oauth_client_secret,
+        )
+        status = self._inspect_client(client)
+        linked = self.vault.save(
+            account_id=account_id,
+            auth_type="oauth",
+            secret_payload={"refresh_token": refresh_token},
+            workspace=status["workspace"],
+            environments=status["environments"],
+        )
+        self.invalidate_client(account_id)
+        return linked
 
     def spawn_pipeline(
         self,
@@ -45,7 +127,7 @@ class ModalGateway:
         kwargs: dict[str, Any] | None = None,
         gpu: str | None = None,
     ) -> RunRecord:
-        client = self.client()
+        client = self.client(pipeline.account_id)
         fn = modal.Function.from_name(
             pipeline.app_name,
             pipeline.function_name,
@@ -63,13 +145,14 @@ class ModalGateway:
         return RunRecord(
             call_id=call.object_id,
             pipeline_name=pipeline.name,
+            account_id=pipeline.account_id,
             environment=pipeline.environment,
             gpu=selected_gpu,
             status="spawned",
         )
 
     def get_run(self, record: RunRecord, *, include_result: bool = False) -> RunRecord:
-        call = modal.FunctionCall.from_id(record.call_id, client=self.client())
+        call = modal.FunctionCall.from_id(record.call_id, client=self.client(record.account_id))
         if not include_result:
             return record.model_copy(update={"status": "unknown", "updated_at": utc_now()})
 
@@ -85,8 +168,10 @@ class ModalGateway:
             update={"status": "completed", "result_preview": result, "updated_at": utc_now()}
         )
 
-    def get_run_logs(self, call_id: str, *, entries: int = 100) -> list[dict[str, Any]]:
-        call = modal.FunctionCall.from_id(call_id, client=self.client())
+    def get_run_logs(
+        self, call_id: str, *, account_id: str = "default", entries: int = 100
+    ) -> list[dict[str, Any]]:
+        call = modal.FunctionCall.from_id(call_id, client=self.client(account_id))
         return [
             {
                 "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
@@ -96,8 +181,10 @@ class ModalGateway:
             for entry in call.logs.tail(entries=entries)
         ]
 
-    def cancel_run(self, call_id: str, *, terminate_containers: bool = False) -> None:
-        call = modal.FunctionCall.from_id(call_id, client=self.client())
+    def cancel_run(
+        self, call_id: str, *, account_id: str = "default", terminate_containers: bool = False
+    ) -> None:
+        call = modal.FunctionCall.from_id(call_id, client=self.client(account_id))
         call.cancel(terminate_containers=terminate_containers)
 
     def upload_model_file(
@@ -105,6 +192,7 @@ class ModalGateway:
         *,
         name: str,
         version: str,
+        account_id: str,
         local_path: Path,
         volume_name: str,
         remote_path: str,
@@ -123,7 +211,7 @@ class ModalGateway:
             volume_name,
             environment_name=environment,
             create_if_missing=True,
-            client=self.client(),
+            client=self.client(account_id),
         )
         with volume.batch_upload(force=True) as batch:
             batch.put_file(local_path, remote_path)
@@ -131,6 +219,7 @@ class ModalGateway:
         return ModelArtifact(
             name=name,
             version=version,
+            account_id=account_id,
             volume_name=volume_name,
             remote_path=remote_path,
             source=source or f"file://{local_path.name}",

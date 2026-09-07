@@ -1,30 +1,34 @@
 # 모달 플러그인 / modal-plugin
 
-An MCP control plane for managing Modal pipelines, model artifacts, and GPU runs from ChatGPT and Codex.
+An MCP control plane for managing Modal accounts, generation pipelines, model artifacts, and GPU runs from ChatGPT and Codex.
 
-> Status: **v0.1 bootstrap**. The current implementation connects to one Modal credential context per MCP server instance. Multi-user OAuth account linking and direct browser uploads are the next milestones.
+> Status: **v0.2 account-linking bootstrap**. Token-based account linking works through a one-time browser URL. Modal OAuth refresh-token support is implemented for deployments that have Modal-issued OAuth client credentials. The MCP endpoint itself still needs production authentication before public deployment.
 
-## What v0.1 does
+## What v0.2 does
 
 - Uses the same MCP server from **Codex (stdio)** and **ChatGPT/remote MCP clients (Streamable HTTP)**.
-- Verifies the connected Modal workspace and environments.
+- Keeps local `modal setup` / `MODAL_TOKEN_*` authentication as a fallback for Codex.
+- Links multiple Modal accounts by `account_id` and encrypts stored credentials with Fernet.
+- Keeps credentials out of tool arguments by using a short-lived one-time browser link.
+- Supports Modal API-token accounts and Modal OAuth refresh-token accounts.
+- Associates pipelines, model artifacts, and runs with the Modal account that owns them.
 - Registers, reads, updates, and deletes named generation-pipeline definitions.
 - Maps a pipeline to a deployed Modal `App` + `Function`, with an optional GPU override.
 - Spawns Modal `FunctionCall`s, polls results, reads logs, and cancels runs.
 - Registers model artifacts and uploads server-local files into Modal Volumes.
 - Requires explicit `confirm=true` for compute runs, persistent uploads, cancellation, and deletes.
-- Never stores Modal credentials in the local registry.
 
 ## Architecture
 
 ```text
 ChatGPT ── Streamable HTTP ─┐
-                            ├── modal-plugin MCP server ── Modal Python SDK ── Modal
+                            ├── modal-plugin MCP server ── account-aware Modal Client ── Modal
 Codex ───────── stdio ──────┘             │
-                                          └── local JSON registry (v0.1)
+                                          ├── pipeline/model/run JSON registries
+                                          └── encrypted credential registry
 ```
 
-A "pipeline" in v0.1 is deliberately a control-plane pointer to a deployed Modal entry function rather than arbitrary generated Python. That lets an agent safely change the app/function/environment/GPU/default arguments/model bindings without giving the MCP server an unrestricted code-execution endpoint.
+A "pipeline" is currently a control-plane pointer to a deployed Modal entry function rather than arbitrary generated Python. That lets an agent safely change app/function/environment/GPU/default arguments/model bindings without exposing an unrestricted code-execution endpoint. Source-manifest deployment is the next pipeline milestone.
 
 ## Requirements
 
@@ -40,50 +44,72 @@ cd modal-plugin
 uv sync --extra dev
 ```
 
-Authenticate locally with Modal:
+## Local Codex authentication
+
+For a local MCP server, existing Modal authentication continues to work:
 
 ```bash
 uv run modal setup
-```
-
-Or provide Modal's standard credential environment variables to the MCP server:
-
-```bash
-export MODAL_TOKEN_ID="..."
-export MODAL_TOKEN_SECRET="..."
-```
-
-Do **not** put real credentials in `.env.example`, Git commits, prompts, or issue text.
-
-## Run for Codex / local MCP
-
-```bash
 uv run modal-plugin --transport stdio
 ```
 
-Configure Codex to launch that command as an MCP server. The exact Codex configuration surface can evolve; the server itself only requires a standard stdio MCP client.
+A pipeline using `account_id="default"` falls back to the active local Modal profile when no encrypted linked account named `default` exists.
 
-## Run as a remote MCP server
+## Encrypted account linking
+
+Generate an encryption key once and inject it through your secret manager or environment:
 
 ```bash
+uv run modal-plugin --generate-credential-key
+export MODAL_PLUGIN_CREDENTIAL_KEY="<generated value>"
+```
+
+Do not commit this key. The encrypted registry is stored under `.modal-plugin/credentials.json` by default.
+
+For the remote HTTP server, configure its externally reachable base URL:
+
+```bash
+export MODAL_PLUGIN_PUBLIC_BASE_URL="https://modal-plugin.example.com"
 uv run modal-plugin --transport streamable-http --host 0.0.0.0 --port 8000
 ```
 
-The MCP endpoint is served by the MCP Python SDK's Streamable HTTP transport. Put TLS and authentication in front of it before exposing it publicly.
+Then an MCP client can call:
+
+```text
+create_modal_account_link(account_id="default")
+```
+
+The tool returns a one-time URL, valid for 10 minutes by default. Open it in a browser and enter either a Modal API token pair or, when your deployment has Modal-issued OAuth client credentials configured, a Modal OAuth refresh token. Credentials are POSTed directly from the browser to the MCP service and are not sent through ChatGPT or Codex.
+
+### Modal OAuth deployments
+
+Modal's Python SDK supports `Client.from_oauth_credentials(refresh_token, oauth_client_id=..., oauth_client_secret=...)` for managing Modal on behalf of third-party users. If Modal has issued OAuth integration credentials to your application, configure:
+
+```bash
+export MODAL_PLUGIN_MODAL_OAUTH_CLIENT_ID="oc-..."
+export MODAL_PLUGIN_MODAL_OAUTH_CLIENT_SECRET="ov-..."
+```
+
+The public Modal documentation describes consuming the refresh token but does not currently document a self-service OAuth client registration/authorization flow. This repository therefore does not guess authorization/token endpoint URLs. Once Modal issues the integration details, the browser callback can be wired to that flow without changing the per-user client/vault design.
 
 ## Example agent workflow
 
-1. `modal_account_status()`
-2. `create_pipeline(name="flux-dev", app_name="image-generation", function_name="generate", environment="dev", gpu="A100")`
-3. Review the pipeline.
-4. `run_pipeline(name="flux-dev", kwargs={"prompt": "..."}, confirm=true)`
-5. `get_run_status(call_id="fc-...", include_result=true)`
-6. `get_run_logs(call_id="fc-...")`
+1. `list_modal_accounts()`
+2. `create_modal_account_link(account_id="studio")` if needed
+3. `modal_account_status(account_id="studio")`
+4. `create_pipeline(name="flux-dev", account_id="studio", app_name="image-generation", function_name="generate", environment="dev", gpu="A100")`
+5. Review the pipeline.
+6. `run_pipeline(name="flux-dev", kwargs={"prompt": "..."}, confirm=true)`
+7. `get_run_status(call_id="fc-...", include_result=true)`
+8. `get_run_logs(call_id="fc-...")`
 
 ## MCP tools
 
-### Account
+### Accounts
 
+- `list_modal_accounts`
+- `create_modal_account_link`
+- `disconnect_modal_account`
 - `modal_account_status`
 
 ### Pipelines
@@ -111,16 +137,23 @@ The MCP endpoint is served by the MCP Python SDK's Streamable HTTP transport. Pu
 
 For a **local Codex MCP server**, `upload_model_file` can upload a local model file directly into a Modal Volume.
 
-For a **remote ChatGPT MCP server**, the tool's `local_path` is a path on the MCP server, not the user's computer. Direct browser-to-storage upload therefore belongs in the next milestone: signed uploads to object storage followed by an import worker into a Modal Volume.
+For a **remote ChatGPT MCP server**, `local_path` is a path on the MCP server, not the user's computer. Direct browser-to-storage upload is therefore a separate milestone: signed uploads to object storage followed by an import worker into a Modal Volume.
+
+## Remote MCP security
+
+`streamable-http` uses stateless JSON responses, but the MCP endpoint does **not** yet implement production caller authentication. Do not expose it directly to the Internet. Put it behind a private gateway while developing. The next auth milestone is an OAuth-protected MCP resource server suitable for ChatGPT plus authenticated Codex remote access.
 
 ## Registry
 
-v0.1 uses atomic JSON files under `.modal-plugin/` by default. This is intentionally simple and works for one process. Before horizontal scaling, replace `RegistryStore` with Postgres/Supabase or another transactional store.
+v0.2 still uses local atomic JSON registries. Credentials are encrypted separately, but horizontal scaling still requires a transactional shared database and a real secret/KMS integration.
 
 ## Roadmap
 
-- [ ] Modal OAuth account linking with encrypted per-user refresh-token storage
-- [ ] Authenticated remote MCP endpoint for ChatGPT
+- [x] Encrypted multi-account credential registry
+- [x] One-time browser account-link flow
+- [x] Modal OAuth refresh-token client support
+- [ ] Modal-hosted OAuth authorization callback once integration endpoints are issued
+- [ ] OAuth-protected remote MCP endpoint for ChatGPT
 - [ ] Signed browser uploads for large model files
 - [ ] Hugging Face / S3 / R2 model import jobs
 - [ ] Versioned pipeline deployment from source manifests
