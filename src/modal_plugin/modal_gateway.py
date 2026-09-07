@@ -77,7 +77,7 @@ class ModalGateway:
             result = call.get(timeout=0)
         except TimeoutError:
             return record.model_copy(update={"status": "spawned", "updated_at": utc_now()})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - remote user code may raise any exception type.
             return record.model_copy(
                 update={"status": "failed", "error": str(exc), "updated_at": utc_now()}
             )
